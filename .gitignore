@@ -1,0 +1,19 @@
+# Secrets
+.env
+config/database.yaml
+
+# Data / caches
+data/
+outputs/
+
+# Python
+myenv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Tools
+.pytest_cache/
+.claude/
+.codex/

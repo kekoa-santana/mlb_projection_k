@@ -1,0 +1,19 @@
+seasons:
+  # Unsupervised models (pitch archetypes): use all data for stable clusters
+  clustering: [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+  # Predictive models: expanding-window CV trains through 2024, predicts each next season
+  train: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
+  # Final held-out validation — only touch once
+  holdout: [2025]
+  all_available: [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+
+sampling:
+  draws: 2000
+  tune: 1000
+  chains: 4
+  target_accept: 0.95
+  random_seed: 42
+
+cache:
+  directory: data/cached
+  format: parquet
