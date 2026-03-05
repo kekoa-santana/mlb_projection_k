@@ -6,7 +6,7 @@ A hierarchical Bayesian projection system for MLB player performance, with a gam
 ## Tech Stack
 - **Language:** Python 3.11+
 - **Bayesian Modeling:** PyMC 5.x, ArviZ for diagnostics
-- **Data:** PostgreSQL (existing database with Statcast pitch-level + boxscore data, 2018-2025)
+- **Data:** PostgreSQL (existing database with Statcast pitch-level + boxscore data, 2018-2025 complete seasons)
 - **Data Processing:** pandas, numpy, sqlalchemy
 - **ML/Evaluation:** scikit-learn (calibration curves, metrics), XGBoost (optional Stuff+ layer)
 - **Visualization:** matplotlib, seaborn
@@ -133,8 +133,11 @@ For each (pitcher, batter) pair:
 5. **Cache aggressively.** Pitch-level queries are expensive. Feature-engineered tables should be cached as Parquet files with clear date stamps. Rebuild only when new data arrives.
 
 6. **Branding consistency.** All visualizations use The Data Diamond color palette:
-   - Primary: Hawaiian flag colors — Red (#C8102E), Yellow (#FFD700), Green (#006B3F)
-   - Background: Dark (#1a1a2e) or clean white depending on platform
+   - Gold: #C8A96E (primary accent, highlights)
+   - Teal: #4FC3C8 (secondary accent, positive/improvement)
+   - Slate: #7B8FA6 (neutral, axes, secondary text)
+   - Cream: #F5F2EE (light background)
+   - Dark: #0F1117 (dark background, primary text on light)
    - Font: Clean sans-serif, no clutter
    - Every chart gets a "The Data Diamond" watermark
 
@@ -170,7 +173,7 @@ Every model must be evaluated with:
 ### Phase 1: Data Foundation
 1. [x] Verify database connection and inspect schema
 2. [x] Build and cache pitch-type aggregation tables (hitter and pitcher profiles)
-3. [ ] Data QA sanity reports (denominator consistency, row count validation, anomaly flags)
+3. [x] Data QA sanity reports (denominator consistency, row count validation, anomaly flags)
 4. [ ] League baselines v2: extend `compute_league_baselines` with **batter_stand splits** and **pitch archetype** granularity
 5. [ ] Pitch archetype clustering from `sat_pitch_shape` (velo, pfx_x, pfx_z, spin_rate, extension) — feeds baselines AND Layer 2
 
@@ -182,18 +185,23 @@ Every model must be evaluated with:
 10. [ ] Run walk-forward backtest, verify convergence, confirm beats Marcel
 
 ### Phase 3: Layer 2 — Matchup Model
-11. [ ] Matchup scoring module: pitch-archetype × hitter vulnerability (logit/additive, start with whiff/K)
-12. [ ] Validate matchup lift over "no-matchup" baseline on game Ks
+11. [x] Matchup scoring module: pitch-archetype × hitter vulnerability (logit/additive, start with whiff/K)
+12. [x] Validate matchup lift over "no-matchup" baseline on game Ks
 
 ### Phase 4: Layer 3 — Game K Posterior
-13. [ ] Workload / BF distribution model (predict BF by role, team, season)
-14. [ ] Game K posterior: combine K% posterior + matchup adjustment + BF distribution
-15. [ ] Produce P(over X.5) and calibration
+13. [x] Workload / BF distribution model (predict BF by role, team, season)
+14. [x] Game K posterior: combine K% posterior + matchup adjustment + BF distribution
+15. [x] Produce P(over X.5) and calibration — walk-forward backtest (11,517 games): RMSE=2.280, Brier=0.1872, calibration 50/80/90% = 48/79/89%
 
 ### Phase 5: Expansion & Content
 16. [ ] Expand targets: BB%, HR, xwOBA on contact
 17. [ ] Betting edge finder and tracker (Kelly sizing)
 18. [ ] Content visualizations (matchup cards, hitter strength profiles)
+
+### Projection Target
+- **Full seasons available:** 2018–2025
+- **Projection target:** 2026 season (train on 2020-2025, project forward)
+- Pre-season content uses 2025 posteriors projected into 2026
 
 ## Advanced Feature Triage
 

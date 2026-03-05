@@ -73,29 +73,40 @@ def test_prepare_pitcher_model_data_basic() -> None:
     assert data["k"].shape == (3,)
     assert data["bf"].dtype == int
     assert data["k"].dtype == int
-    assert data["whiff_z"].shape == (3,)
-    assert data["barrel_against_z"].shape == (3,)
-    assert np.all(np.isfinite(data["whiff_z"]))
-    assert np.all(np.isfinite(data["barrel_against_z"]))
+    # Default: no covariates
+    assert "whiff_z" not in data
+    assert "barrel_against_z" not in data
     # is_starter passthrough
     assert "is_starter" in data
     assert data["is_starter"].shape == (3,)
     assert list(data["is_starter"]) == [1, 1, 0]
 
 
+def test_prepare_pitcher_model_data_with_covariates() -> None:
+    """use_covariates=True includes z-scored whiff and barrel arrays."""
+    df = _make_pitcher_df()
+    data = prepare_pitcher_model_data(df, use_covariates=True)
+
+    assert data["use_covariates"] is True
+    assert data["whiff_z"].shape == (3,)
+    assert data["barrel_against_z"].shape == (3,)
+    assert np.all(np.isfinite(data["whiff_z"]))
+    assert np.all(np.isfinite(data["barrel_against_z"]))
+
+
 def test_prepare_pitcher_model_data_constant_covariates() -> None:
-    """Constant whiff_rate/barrel_rate_against → z-scores = 0."""
+    """Constant whiff_rate/barrel_rate_against -> z-scores = 0."""
     df = _make_pitcher_df()
     df["whiff_rate"] = 0.25
     df["barrel_rate_against"] = 0.05
-    data = prepare_pitcher_model_data(df)
+    data = prepare_pitcher_model_data(df, use_covariates=True)
 
     assert np.allclose(data["whiff_z"], 0.0)
     assert np.allclose(data["barrel_against_z"], 0.0)
 
 
 def test_build_pitcher_k_rate_model_has_expected_variables() -> None:
-    """mu_pop, sigma_player, beta_whiff, beta_barrel_against, alpha, k_rate exist; NO hitter vars."""
+    """Default model (no covariates): mu_pop, sigma_player, alpha, k_rate, beta_starter."""
     df = _make_pitcher_df()
     data = prepare_pitcher_model_data(df)
     model = build_pitcher_k_rate_model(data)
@@ -104,19 +115,32 @@ def test_build_pitcher_k_rate_model_has_expected_variables() -> None:
     det_names = {d.name for d in model.deterministics}
     all_names = rv_names | det_names
 
-    # Pitcher-specific variables present
+    # Core variables present
     assert "mu_pop" in rv_names
     assert "sigma_player" in rv_names
-    assert "beta_whiff" in rv_names
-    assert "beta_barrel_against" in rv_names
     assert "beta_starter" in rv_names
     assert "alpha" in det_names
     assert "k_rate" in det_names
+
+    # Covariates absent by default
+    assert "beta_whiff" not in all_names
+    assert "beta_barrel_against" not in all_names
 
     # Hitter-specific variables absent
     assert "beta_barrel" not in all_names
     assert "beta_hard_hit" not in all_names
     assert "gamma_pop" not in all_names
+
+
+def test_build_pitcher_k_rate_model_with_covariates() -> None:
+    """use_covariates=True adds beta_whiff and beta_barrel_against."""
+    df = _make_pitcher_df()
+    data = prepare_pitcher_model_data(df, use_covariates=True)
+    model = build_pitcher_k_rate_model(data)
+
+    rv_names = {rv.name for rv in model.free_RVs}
+    assert "beta_whiff" in rv_names
+    assert "beta_barrel_against" in rv_names
 
 
 def test_build_pitcher_k_rate_model_uses_bf_not_pa() -> None:
@@ -128,7 +152,6 @@ def test_build_pitcher_k_rate_model_uses_bf_not_pa() -> None:
     assert "pa" not in data
 
     model = build_pitcher_k_rate_model(data)
-    # Model should build without error — Binomial uses bf
     assert model is not None
 
 
@@ -144,14 +167,22 @@ def test_build_pitcher_k_rate_model_no_role_no_beta_starter() -> None:
     assert "beta_starter" not in rv_names
 
 
-def test_prepare_pitcher_model_data_missing_column_raises() -> None:
-    """Missing whiff_rate or barrel_rate_against → ValueError."""
+def test_prepare_pitcher_model_data_missing_covariates_raises() -> None:
+    """use_covariates=True with missing columns -> ValueError."""
     df = _make_pitcher_df()
 
     df_no_whiff = df.drop(columns=["whiff_rate"])
     with pytest.raises(ValueError, match="whiff_rate"):
-        prepare_pitcher_model_data(df_no_whiff)
+        prepare_pitcher_model_data(df_no_whiff, use_covariates=True)
 
     df_no_barrel = df.drop(columns=["barrel_rate_against"])
     with pytest.raises(ValueError, match="barrel_rate_against"):
-        prepare_pitcher_model_data(df_no_barrel)
+        prepare_pitcher_model_data(df_no_barrel, use_covariates=True)
+
+
+def test_prepare_pitcher_model_data_no_covariates_no_error() -> None:
+    """Default (no covariates) works even without whiff_rate/barrel columns."""
+    df = _make_pitcher_df().drop(columns=["whiff_rate", "barrel_rate_against"])
+    data = prepare_pitcher_model_data(df)
+    assert "whiff_z" not in data
+    assert data["n_players"] == 2

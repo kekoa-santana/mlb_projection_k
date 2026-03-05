@@ -242,11 +242,10 @@ LEAGUE_AVG_OVERALL: dict[str, float] = {
 # Branding — The Data Diamond color palette
 # ---------------------------------------------------------------------------
 COLORS = {
-    "red": "#C8102E",
-    "yellow": "#FFD700",
-    "green": "#006B3F",
-    "dark_bg": "#1a1a2e",
-    "white_bg": "#FFFFFF",
-    "text_light": "#E0E0E0",
-    "text_dark": "#1a1a2e",
+    "gold": "#C8A96E",
+    "teal": "#4FC3C8",
+    "slate": "#7B8FA6",
+    "cream": "#F5F2EE",
+    "dark_bg": "#0F1117",
+    "white": "#FFFFFF",
 }

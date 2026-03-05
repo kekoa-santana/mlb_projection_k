@@ -1,10 +1,10 @@
 seasons:
   # Unsupervised models (pitch archetypes): use all data for stable clusters
   clustering: [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
-  # Predictive models: expanding-window CV trains through 2024, predicts each next season
-  train: [2018, 2019, 2020, 2021, 2022, 2023, 2024]
-  # Final held-out validation — only touch once
-  holdout: [2025]
+  # Predictive models: train on all complete seasons, project into 2026
+  train: [2020, 2021, 2022, 2023, 2024, 2025]
+  # Backtesting used walk-forward folds; 2025 is now fully available for training
+  projection_target: 2026
   all_available: [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
 
 sampling:
@@ -17,3 +17,14 @@ sampling:
 cache:
   directory: data/cached
   format: parquet
+
+game_k:
+  n_mc_draws: 4000
+  bf_min: 3
+  bf_max: 35
+  bf_shrinkage_k: 2.4
+  pop_bf_mu: 22.0
+  pop_bf_sigma: 4.5
+  pop_within_pitcher_std: 3.4
+  min_bf_for_evaluation: 15
+  k_lines: [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5]

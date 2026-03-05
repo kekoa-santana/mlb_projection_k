@@ -88,7 +88,7 @@ def test_walk_forward_backtest_mocked_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(
         backtesting,
         "_summarize_posterior_for_season",
-        lambda trace, data, season, league_avg_k: pd.DataFrame(
+        lambda trace, data, season, league_avg_k, **kwargs: pd.DataFrame(
             [
                 {
                     "batter_id": 1,

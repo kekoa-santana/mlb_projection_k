@@ -27,19 +27,28 @@ logger = logging.getLogger(__name__)
 OUTPUTS_DIR = Path(__file__).resolve().parents[2] / "outputs"
 
 
-def prepare_pitcher_model_data(df: pd.DataFrame) -> dict[str, Any]:
+def prepare_pitcher_model_data(
+    df: pd.DataFrame,
+    use_covariates: bool = False,
+) -> dict[str, Any]:
     """Prepare pitcher multi-season data for the PyMC model.
 
     Encodes pitcher IDs as integer indices, computes season offsets,
-    and z-scores arsenal covariates.
+    and optionally z-scores arsenal covariates.
 
     Parameters
     ----------
     df : pd.DataFrame
         Output of ``build_multi_season_pitcher_k_data``.
-        Must contain: pitcher_id, season, batters_faced, k, k_rate,
-        whiff_rate, barrel_rate_against.  Optionally ``is_starter``
-        (1=starter, 0=reliever); if present it is passed through as-is.
+        Must contain: pitcher_id, season, batters_faced, k, k_rate.
+        When ``use_covariates=True``, also requires whiff_rate and
+        barrel_rate_against.
+        Optionally ``is_starter`` (1=starter, 0=reliever).
+    use_covariates : bool
+        If True, include whiff_rate and barrel_rate_against as covariates.
+        Default False — these are too correlated with K% (r=0.71) and
+        cause overconfident posteriors. Set True only for experimental
+        comparisons.
 
     Returns
     -------
@@ -49,14 +58,15 @@ def prepare_pitcher_model_data(df: pd.DataFrame) -> dict[str, Any]:
     Raises
     ------
     ValueError
-        If ``whiff_rate`` or ``barrel_rate_against`` columns are missing.
+        If ``use_covariates=True`` but required columns are missing.
     """
-    for col in ["whiff_rate", "barrel_rate_against"]:
-        if col not in df.columns:
-            raise ValueError(
-                f"Missing required column '{col}'. "
-                "Use build_multi_season_pitcher_k_data() to produce the input."
-            )
+    if use_covariates:
+        for col in ["whiff_rate", "barrel_rate_against"]:
+            if col not in df.columns:
+                raise ValueError(
+                    f"Missing required column '{col}'. "
+                    "Use build_multi_season_pitcher_k_data() to produce the input."
+                )
 
     df = df.copy()
 
@@ -69,29 +79,31 @@ def prepare_pitcher_model_data(df: pd.DataFrame) -> dict[str, Any]:
     min_season = df["season"].min()
     df["season_idx"] = df["season"] - min_season
 
-    # --- Statcast covariates (z-scored, NaN → 0 for missing/constant) ---
-    for col in ["whiff_rate", "barrel_rate_against"]:
-        mu = df[col].mean()
-        sd = df[col].std()
-        if pd.isna(sd) or np.isclose(sd, 0.0):
-            df[f"{col}_z"] = 0.0
-        else:
-            df[f"{col}_z"] = ((df[col] - mu) / sd).fillna(0.0)
-
     result = {
         "player_idx": df["player_idx"].values.astype(int),
         "season_idx": df["season_idx"].values.astype(int),
         "bf": df["batters_faced"].values.astype(int),
         "k": df["k"].values.astype(int),
-        "whiff_z": df["whiff_rate_z"].values.astype(float),
-        "barrel_against_z": df["barrel_rate_against_z"].values.astype(float),
         "n_players": len(player_ids),
         "n_seasons": df["season_idx"].max() + 1,
         "player_map": player_map,
         "player_ids": player_ids,
         "min_season": min_season,
+        "use_covariates": use_covariates,
         "df": df,
     }
+
+    # --- Optional arsenal covariates ---
+    if use_covariates:
+        for col in ["whiff_rate", "barrel_rate_against"]:
+            mu = df[col].mean()
+            sd = df[col].std()
+            if pd.isna(sd) or np.isclose(sd, 0.0):
+                df[f"{col}_z"] = 0.0
+            else:
+                df[f"{col}_z"] = ((df[col] - mu) / sd).fillna(0.0)
+        result["whiff_z"] = df["whiff_rate_z"].values.astype(float)
+        result["barrel_against_z"] = df["barrel_rate_against_z"].values.astype(float)
 
     if "is_starter" in df.columns:
         result["is_starter"] = df["is_starter"].values.astype(int)
@@ -131,11 +143,10 @@ def build_pitcher_k_rate_model(
     season_idx = data["season_idx"]
     bf = data["bf"]
     k_obs = data["k"]
-    whiff_z = data["whiff_z"]
-    barrel_against_z = data["barrel_against_z"]
     n_players = data["n_players"]
     n_seasons = data["n_seasons"]
     has_role = "is_starter" in data
+    has_covariates = data.get("use_covariates", False)
 
     # League-average K% on logit scale
     league_k_logit = np.log(
@@ -147,12 +158,6 @@ def build_pitcher_k_rate_model(
         mu_pop = pm.Normal("mu_pop", mu=league_k_logit, sigma=0.3)
         sigma_player = pm.HalfNormal("sigma_player", sigma=0.5)
 
-        # --- Arsenal covariate effects ---
-        # Wider prior (0.3) than hitter model (0.2): whiff_rate is a more
-        # direct causal predictor of pitcher K%.
-        beta_whiff = pm.Normal("beta_whiff", mu=0, sigma=0.3)
-        beta_barrel_against = pm.Normal("beta_barrel_against", mu=0, sigma=0.3)
-
         # --- Player-level intercepts (non-centered) ---
         alpha_raw = pm.Normal("alpha_raw", mu=0, sigma=1, shape=n_players)
         alpha = pm.Deterministic(
@@ -160,7 +165,7 @@ def build_pitcher_k_rate_model(
         )
 
         # --- Season-to-season innovation (random walk) ---
-        sigma_season = pm.HalfNormal("sigma_season", sigma=0.15)
+        sigma_season = pm.HalfNormal("sigma_season", sigma=0.2)
 
         if n_seasons > 1:
             innovation = pm.Normal(
@@ -178,19 +183,24 @@ def build_pitcher_k_rate_model(
         else:
             season_effect = pt.zeros((n_players, 1))
 
-        # --- Starter/reliever role effect ---
-        if has_role:
-            is_starter = data["is_starter"]
-            beta_starter = pm.Normal("beta_starter", mu=0, sigma=0.2)
-
         # --- Linear predictor ---
         theta = (
             alpha[player_idx]
             + season_effect[player_idx, season_idx]
-            + beta_whiff * whiff_z
-            + beta_barrel_against * barrel_against_z
         )
+
+        # --- Optional arsenal covariates ---
+        if has_covariates:
+            whiff_z = data["whiff_z"]
+            barrel_against_z = data["barrel_against_z"]
+            beta_whiff = pm.Normal("beta_whiff", mu=0, sigma=0.3)
+            beta_barrel_against = pm.Normal("beta_barrel_against", mu=0, sigma=0.3)
+            theta = theta + beta_whiff * whiff_z + beta_barrel_against * barrel_against_z
+
+        # --- Starter/reliever role effect ---
         if has_role:
+            is_starter = data["is_starter"]
+            beta_starter = pm.Normal("beta_starter", mu=0, sigma=0.2)
             theta = theta + beta_starter * is_starter
 
         # --- K rate on probability scale ---
@@ -321,12 +331,10 @@ def check_pitcher_convergence(trace: az.InferenceData) -> dict[str, Any]:
     dict
         Summary with r_hat, ESS, and divergence counts.
     """
-    var_names = [
-        "mu_pop", "sigma_player", "sigma_season",
-        "beta_whiff", "beta_barrel_against",
-    ]
-    if "beta_starter" in trace.posterior:
-        var_names.append("beta_starter")
+    var_names = ["mu_pop", "sigma_player", "sigma_season"]
+    for v in ["beta_whiff", "beta_barrel_against", "beta_starter"]:
+        if v in trace.posterior:
+            var_names.append(v)
     summary = az.summary(trace, var_names=var_names)
     n_divergences = int(trace.sample_stats["diverging"].sum())
     max_rhat = float(summary["r_hat"].max())
