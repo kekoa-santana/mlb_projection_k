@@ -32,23 +32,53 @@ Do NOT assume table or column names — verify them.
 ## Project Structure
 ```
 player_profiles/
+├── .env                         # DB credentials (env vars, fallback for db.py)
 ├── config/
-│   ├── database.yaml          # DB connection config
-│   └── model.yaml             # Sampling + season config
+│   └── model.yaml               # Sampling, season config, game_k params
 ├── src/
 │   ├── data/
-│   │   ├── db.py              # SQLAlchemy engine + read_sql helper
-│   │   ├── queries.py         # 5 core query functions
-│   │   └── feature_eng.py     # Vulnerability/strength profiles + caching
-│   ├── models/                # (ready for Layer 1 PyMC)
+│   │   ├── db.py                # SQLAlchemy engine + read_sql helper
+│   │   ├── queries.py           # 13 query functions (season totals, profiles, game logs, etc.)
+│   │   ├── feature_eng.py       # Vulnerability/strength profiles + caching
+│   │   ├── league_baselines.py  # Per (pitch_type/archetype, batter_stand) baselines
+│   │   ├── pitch_archetypes.py  # KMeans k=8 pitch shape clustering
+│   │   └── data_qa.py           # Data quality / sanity reports
+│   ├── models/
+│   │   ├── k_rate_model.py          # Hitter K% hierarchical Bayesian (PyMC)
+│   │   ├── pitcher_k_rate_model.py  # Pitcher K% hierarchical Bayesian
+│   │   ├── hitter_model.py          # Generalized hitter model (K%, BB%, HR/PA, xwOBA)
+│   │   ├── pitcher_model.py         # Generalized pitcher model (K%, BB%, HR/BF)
+│   │   ├── hitter_projections.py    # Composite hitter projections + breakout scoring
+│   │   ├── pitcher_projections.py   # Composite pitcher projections + breakout scoring
+│   │   ├── matchup.py               # Pitch-type & archetype matchup scoring
+│   │   ├── bf_model.py              # Batters-faced workload model
+│   │   └── game_k_model.py          # Game-level K posterior (Layer 3)
 │   ├── utils/
-│   │   └── constants.py       # Pitch maps, whiff defs, zone boundaries, league avgs
+│   │   └── constants.py         # Pitch maps, whiff defs, zone boundaries, league avgs
 │   ├── evaluation/
+│   │   ├── backtesting.py           # Original K%-only hitter + pitcher backtest
+│   │   ├── hitter_backtest.py       # Generalized hitter walk-forward backtest
+│   │   ├── pitcher_backtest.py      # Generalized pitcher walk-forward backtest
+│   │   ├── matchup_validation.py    # In-season matchup lift validation
+│   │   └── game_k_validation.py     # Full game-level K backtest
 │   └── viz/
-├── data/cached/               # Parquet cache (2 files already created)
-├── tests/
+│       ├── theme.py                 # The Data Diamond brand theme
+│       ├── projections.py           # K% mover cards, individual pitcher cards
+│       └── composite_cards.py       # Composite breakout/regression cards
+├── scripts/
+│   ├── backfill_dim_player.py       # One-time dim_player rebuild
+│   ├── run_season_backtest.py       # K%-only backtest runner
+│   ├── run_hitter_backtest.py       # Multi-stat hitter backtest runner
+│   ├── run_pitcher_backtest.py      # Multi-stat pitcher backtest runner
+│   ├── generate_preseason_content.py  # 2026 K% mover cards
+│   └── generate_composite_cards.py    # Composite breakout/regression cards
+├── data/cached/                 # Parquet cache (~60 files, all seasons)
+├── tests/                       # 17 test files, 119 test functions
 ├── notebooks/
-├── outputs/
+├── outputs/                     # Backtest CSVs + content PNGs
+├── docs/
+│   ├── style_guide.md
+│   └── advanced_projection_features.md
 └── pyproject.toml
 ```
 
@@ -57,8 +87,8 @@ player_profiles/
 ### Layer 1: Season-Level Bayesian Projections (PyMC)
 **Purpose:** Estimate true-talent rates for pitchers and hitters with proper uncertainty.
 
-**Target stats (hitters):** K%, BB%, Barrel%, xwOBA
-**Target stats (pitchers):** K%, BB%, HR/9, xwOBA-against
+**Target stats (hitters):** K%, BB%, HR/PA, xwOBA
+**Target stats (pitchers):** K%, BB%, HR/BF
 
 **Model structure:**
 - Hierarchical partial pooling across players (shrink small samples toward population)
@@ -174,18 +204,21 @@ Every model must be evaluated with:
 1. [x] Verify database connection and inspect schema
 2. [x] Build and cache pitch-type aggregation tables (hitter and pitcher profiles)
 3. [x] Data QA sanity reports (denominator consistency, row count validation, anomaly flags)
-4. [ ] League baselines v2: extend `compute_league_baselines` with **batter_stand splits** and **pitch archetype** granularity
-5. [ ] Pitch archetype clustering from `sat_pitch_shape` (velo, pfx_x, pfx_z, spin_rate, extension) — feeds baselines AND Layer 2
+4. [x] League baselines v2: `src/data/league_baselines.py` — per (pitch_type, batter_stand) and (pitch_archetype, batter_stand), multi-season pooled with volume weighting, fallback chain lookup
+5. [x] Pitch archetype clustering: `src/data/pitch_archetypes.py` — KMeans k=8 on 5 shape features, pooled multi-season fit, LHP normalization, per-season assignment with caching
 
 ### Phase 2: Layer 1 — Season Talent Models
 6. [x] Hitter K% hierarchical Bayesian model (PyMC, binomial, random walk, Statcast covariates)
 7. [x] Add **platoon split** (batter_stand) as hierarchical factor to hitter K% model
 8. [x] Pitcher K% model (mirror hitter model using `pitcher_season_totals`; separate whiff skill vs contact suppression as covariates)
 9. [x] Add **starter/reliever role** flag to pitcher model (derive from IP/game in boxscores)
-10. [ ] Run walk-forward backtest, verify convergence, confirm beats Marcel
+10. [x] Walk-forward backtest (`scripts/run_season_backtest.py`, results in `outputs/`):
+    - Hitter: beats Marcel 2/3 folds (MAE +5.1%, +3.0%, -2.0%), 95% coverage 86-89%
+    - Pitcher: Bayes loses to Marcel on MAE/RMSE but wins on Brier (calibration edge: 0.171-0.209 vs 0.205-0.251)
+    - All folds converge (r_hat < 1.05, 0 divergences)
 
 ### Phase 3: Layer 2 — Matchup Model
-11. [x] Matchup scoring module: pitch-archetype × hitter vulnerability (logit/additive, start with whiff/K)
+11. [x] Matchup scoring module: both pitch_type AND pitch_archetype scoring (`matchup.py`), log-odds additive method, reliability-weighted fallback chains
 12. [x] Validate matchup lift over "no-matchup" baseline on game Ks
 
 ### Phase 4: Layer 3 — Game K Posterior
@@ -194,13 +227,14 @@ Every model must be evaluated with:
 15. [x] Produce P(over X.5) and calibration — walk-forward backtest (11,517 games): RMSE=2.280, Brier=0.1872, calibration 50/80/90% = 48/79/89%
 
 ### Phase 5: Expansion & Content
-16. [ ] Expand targets: BB%, HR, xwOBA on contact
+16. [x] Expand hitter targets: BB%, HR/PA, xwOBA — generalized hitter model (`src/models/hitter_model.py`), composite projections (`src/models/hitter_projections.py`), age-bucket priors, LogNormal sigma_season + floor, backtest: K%/BB% beat Marcel MAE 2/3, all stats beat Brier, coverage 84-94%
+16b. [x] Expand pitcher targets: K%, BB%, HR/BF — generalized pitcher model (`src/models/pitcher_model.py`), composite projections (`src/models/pitcher_projections.py`), age-bucket priors, starter/reliever covariate, backtest: HR/BF beats Marcel MAE all 3, all stats beat Brier, coverage 88-93%
 17. [ ] Betting edge finder and tracker (Kelly sizing)
-18. [ ] Content visualizations (matchup cards, hitter strength profiles)
+18. [x] Content visualizations: `src/viz/theme.py`, `src/viz/projections.py`, `scripts/generate_preseason_content.py`, `docs/style_guide.md` — pitcher/hitter K% mover cards + individual pitcher cards generated for 2026
 
 ### Projection Target
 - **Full seasons available:** 2018–2025
-- **Projection target:** 2026 season (train on 2020-2025, project forward)
+- **Projection target:** 2026 season (train on 2018-2025, project forward)
 - Pre-season content uses 2025 posteriors projected into 2026
 
 ## Advanced Feature Triage

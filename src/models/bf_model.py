@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 # Population defaults (validated against 2022-2025 starter data)
 DEFAULT_POP_BF_MU = 22.0
-DEFAULT_POP_BF_SIGMA = 4.5
 DEFAULT_POP_WITHIN_STD = 3.4
 DEFAULT_SHRINKAGE_K = 2.4  # sigma^2 / tau^2 ≈ 11.56 / 4.84
 

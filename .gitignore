@@ -2,8 +2,9 @@
 .env
 config/database.yaml
 
-# Data / caches
-data/
+# Data / caches (ignore contents, but keep dashboard/ for deployment)
+data/*
+!data/dashboard/
 outputs/
 
 # Python

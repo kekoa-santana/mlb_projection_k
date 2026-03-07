@@ -8,12 +8,12 @@ def test_load_db_config_from_dotenv_whitespace(tmp_path: Path, monkeypatch) -> N
     env_path.write_text(
         "\n".join(
             [
-                "  DB_HOST= localhost",
-                "DB_PORT=5433",
-                "DB_USER=kekoa",
-                "DB_PASSWORD= goatez ",
-                "DB_NAME=mlb_fantasy",
-                "SCHEMA=production",
+                "  DB_HOST= testhost",
+                "DB_PORT=5432",
+                "DB_USER=testuser",
+                "DB_PASSWORD= testpass ",
+                "DB_NAME=testdb",
+                "SCHEMA=public",
             ]
         ),
         encoding="utf-8",
@@ -24,12 +24,12 @@ def test_load_db_config_from_dotenv_whitespace(tmp_path: Path, monkeypatch) -> N
 
     cfg = _load_db_config(path=tmp_path / "missing.yaml", env_path=env_path)
 
-    assert cfg["host"] == "localhost"
-    assert cfg["port"] == 5433
-    assert cfg["user"] == "kekoa"
-    assert cfg["password"] == "goatez"
-    assert cfg["dbname"] == "mlb_fantasy"
-    assert cfg["schema"] == "production"
+    assert cfg["host"] == "testhost"
+    assert cfg["port"] == 5432
+    assert cfg["user"] == "testuser"
+    assert cfg["password"] == "testpass"
+    assert cfg["dbname"] == "testdb"
+    assert cfg["schema"] == "public"
 
 
 def test_env_vars_override_dotenv_values(tmp_path: Path, monkeypatch) -> None:

@@ -2,7 +2,7 @@
 """
 Generate pre-season 2026 content cards using Bayesian K% projections.
 
-Trains pitcher and hitter K% models on 2020-2025, projects posteriors
+Trains pitcher and hitter K% models on 2018-2025, projects posteriors
 forward into 2026, and produces Twitter/X-ready PNG cards.
 
 Usage
@@ -56,7 +56,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("generate_content")
 
-TRAIN_SEASONS = [2020, 2021, 2022, 2023, 2024, 2025]
+TRAIN_SEASONS = [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
 PROJECT_FROM = 2025
 SEASON_LABEL = "2026"
 

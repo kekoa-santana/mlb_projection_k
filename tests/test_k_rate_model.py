@@ -46,17 +46,44 @@ def test_prepare_model_data_handles_constant_covariates() -> None:
     assert data["n_players"] == 2
     assert data["n_seasons"] == 2
     assert data["pa"].shape[0] == 3
+    # Observation-level z-scored covariates always present
+    assert "barrel_z" in data
+    assert "hard_hit_z" in data
+    assert data["barrel_z"].shape == (3,)
+    assert data["hard_hit_z"].shape == (3,)
     assert np.all(np.isfinite(data["barrel_z"]))
     assert np.all(np.isfinite(data["hard_hit_z"]))
+    # All same value → z-scores = 0
     assert np.allclose(data["barrel_z"], 0.0)
     assert np.allclose(data["hard_hit_z"], 0.0)
+
+
+def test_prepare_model_data_observation_level_z_scores() -> None:
+    """Two observations with different barrel/hard_hit get non-zero z-scores."""
+    df = pd.DataFrame([
+        {"batter_id": 10, "batter_name": "A", "season": 2024,
+         "pa": 100, "k": 20, "k_rate": 0.20,
+         "barrel_pct": 0.05, "hard_hit_pct": 0.30},
+        {"batter_id": 11, "batter_name": "B", "season": 2024,
+         "pa": 100, "k": 25, "k_rate": 0.25,
+         "barrel_pct": 0.10, "hard_hit_pct": 0.40},
+    ])
+    data = prepare_model_data(df)
+
+    bz = data["barrel_z"]
+    hz = data["hard_hit_z"]
+    assert np.isclose(bz.mean(), 0.0, atol=0.01)
+    assert np.isclose(hz.mean(), 0.0, atol=0.01)
+    # Different observations should have opposite signs
+    assert bz[0] * bz[1] < 0
+    assert hz[0] * hz[1] < 0
 
 
 # ---------------------------------------------------------------------------
 # Synthetic platoon DataFrame helper
 # ---------------------------------------------------------------------------
 def _make_platoon_df() -> pd.DataFrame:
-    """4 rows: 2 players × 2 pitch hands, with same_side flag."""
+    """4 rows: 2 players x 2 pitch hands, with same_side flag."""
     return pd.DataFrame([
         {"batter_id": 10, "batter_name": "A", "season": 2024,
          "pa": 80, "k": 18, "k_rate": 0.225, "barrel_pct": 0.07,
@@ -98,7 +125,7 @@ def test_prepare_model_data_platoon_false_is_default() -> None:
 
 
 def test_prepare_model_data_platoon_missing_column_raises() -> None:
-    """platoon=True without same_side column → clear ValueError."""
+    """platoon=True without same_side column -> clear ValueError."""
     df = _make_platoon_df().drop(columns=["same_side"])
     with pytest.raises(ValueError, match="same_side"):
         prepare_model_data(df, platoon=True)
@@ -131,3 +158,14 @@ def test_build_k_rate_model_no_platoon_no_gamma() -> None:
     assert "sigma_gamma" not in all_names
     assert "gamma_raw" not in all_names
     assert "gamma" not in all_names
+
+
+def test_build_k_rate_model_always_has_covariates() -> None:
+    """Model always has beta_barrel and beta_hard_hit."""
+    df = _make_platoon_df()
+    data = prepare_model_data(df)
+    model = build_k_rate_model(data)
+
+    rv_names = {rv.name for rv in model.free_RVs}
+    assert "beta_barrel" in rv_names
+    assert "beta_hard_hit" in rv_names

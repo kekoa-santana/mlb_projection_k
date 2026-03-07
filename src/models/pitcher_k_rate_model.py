@@ -1,11 +1,19 @@
 """
-Layer 1: Hierarchical Bayesian K% projection model for pitchers.
+Layer 1: Pitcher K%-only hierarchical Bayesian model.
 
-Mirrors the hitter K% model (k_rate_model.py) with pitcher-specific
-covariates:
-- whiff_rate (arsenal-level whiff skill) → positive effect on K%
-- barrel_rate_against (contact suppression) → negative effect on K%
-- is_starter (role flag from IP/game) → population-level shift
+Used by the Game K prediction pipeline (``game_k_model.py``) to extract
+per-pitcher K% posterior samples, and by content generation scripts.
+For multi-stat composite projections (K%, BB%, HR/BF), see
+``pitcher_model.py`` and ``pitcher_projections.py`` instead.
+
+Uses hierarchical partial pooling + random walk for talent evolution.
+Whiff/barrel covariates are intentionally excluded from the model:
+whiff_rate correlates r=0.71 with K%, which collapses sigma_player
+regardless of parameterization (observation-level, player-level,
+centered, non-centered, any prior width). The model's edge over
+Marcel comes from calibration (Brier scores), not point-estimate MAE.
+
+- is_starter (role flag from IP/game) → observation-level shift
 
 Uses batters_faced (bf) as the Binomial trial count, not PA.
 """
@@ -29,45 +37,27 @@ OUTPUTS_DIR = Path(__file__).resolve().parents[2] / "outputs"
 
 def prepare_pitcher_model_data(
     df: pd.DataFrame,
-    use_covariates: bool = False,
 ) -> dict[str, Any]:
     """Prepare pitcher multi-season data for the PyMC model.
 
     Encodes pitcher IDs as integer indices, computes season offsets,
-    and optionally z-scores arsenal covariates.
+    and computes player-level covariate means for informational use.
+    The covariates are NOT used in the model (whiff_rate's r=0.71
+    correlation with K% collapses variance components), but are
+    retained in the output dict for data exploration.
 
     Parameters
     ----------
     df : pd.DataFrame
         Output of ``build_multi_season_pitcher_k_data``.
         Must contain: pitcher_id, season, batters_faced, k, k_rate.
-        When ``use_covariates=True``, also requires whiff_rate and
-        barrel_rate_against.
-        Optionally ``is_starter`` (1=starter, 0=reliever).
-    use_covariates : bool
-        If True, include whiff_rate and barrel_rate_against as covariates.
-        Default False — these are too correlated with K% (r=0.71) and
-        cause overconfident posteriors. Set True only for experimental
-        comparisons.
+        Optionally whiff_rate, barrel_rate_against, is_starter.
 
     Returns
     -------
     dict
         Arrays and metadata ready for the model.
-
-    Raises
-    ------
-    ValueError
-        If ``use_covariates=True`` but required columns are missing.
     """
-    if use_covariates:
-        for col in ["whiff_rate", "barrel_rate_against"]:
-            if col not in df.columns:
-                raise ValueError(
-                    f"Missing required column '{col}'. "
-                    "Use build_multi_season_pitcher_k_data() to produce the input."
-                )
-
     df = df.copy()
 
     # --- encode player IDs as contiguous ints ---
@@ -79,31 +69,56 @@ def prepare_pitcher_model_data(
     min_season = df["season"].min()
     df["season_idx"] = df["season"] - min_season
 
+    # --- Player-level covariate means (averaged across all seasons) ---
+    # These inform the prior on where a player's K% talent is centered,
+    # NOT the observation-level theta.  This avoids the r=0.71 correlation
+    # issue that caused overconfident posteriors when covariates were at
+    # the observation level.
+    n_players = len(player_ids)
+    whiff_player_mean = np.zeros(n_players, dtype=float)
+    barrel_player_mean = np.zeros(n_players, dtype=float)
+
+    for col in ["whiff_rate", "barrel_rate_against"]:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    player_means = df.groupby("player_idx").agg(
+        whiff_mean=("whiff_rate", "mean"),
+        barrel_mean=("barrel_rate_against", "mean"),
+    )
+
+    for pidx in range(n_players):
+        if pidx in player_means.index:
+            whiff_player_mean[pidx] = player_means.loc[pidx, "whiff_mean"]
+            barrel_player_mean[pidx] = player_means.loc[pidx, "barrel_mean"]
+
+    # Z-score the player-level means
+    for arr, name in [
+        (whiff_player_mean, "whiff"),
+        (barrel_player_mean, "barrel"),
+    ]:
+        arr[:] = np.nan_to_num(arr, nan=0.0)
+        mu = arr.mean()
+        sd = arr.std()
+        if np.isclose(sd, 0.0):
+            arr[:] = 0.0
+        else:
+            arr[:] = (arr - mu) / sd
+
     result = {
         "player_idx": df["player_idx"].values.astype(int),
         "season_idx": df["season_idx"].values.astype(int),
         "bf": df["batters_faced"].values.astype(int),
         "k": df["k"].values.astype(int),
-        "n_players": len(player_ids),
+        "n_players": n_players,
         "n_seasons": df["season_idx"].max() + 1,
         "player_map": player_map,
         "player_ids": player_ids,
         "min_season": min_season,
-        "use_covariates": use_covariates,
+        "whiff_player_mean": whiff_player_mean,
+        "barrel_player_mean": barrel_player_mean,
         "df": df,
     }
-
-    # --- Optional arsenal covariates ---
-    if use_covariates:
-        for col in ["whiff_rate", "barrel_rate_against"]:
-            mu = df[col].mean()
-            sd = df[col].std()
-            if pd.isna(sd) or np.isclose(sd, 0.0):
-                df[f"{col}_z"] = 0.0
-            else:
-                df[f"{col}_z"] = ((df[col] - mu) / sd).fillna(0.0)
-        result["whiff_z"] = df["whiff_rate_z"].values.astype(float)
-        result["barrel_against_z"] = df["barrel_rate_against_z"].values.astype(float)
 
     if "is_starter" in df.columns:
         result["is_starter"] = df["is_starter"].values.astype(int)
@@ -122,7 +137,6 @@ def build_pitcher_k_rate_model(
     - Population mean K% on logit scale ~ Normal(logit(0.224), 0.3)
     - Player-level random intercepts (non-centered)
     - Season random walk for talent evolution
-    - Arsenal covariates: whiff_rate (+K%), barrel_rate_against
     - Starter/reliever role flag (optional)
     - Binomial likelihood: K ~ Binomial(BF, inv_logit(theta))
 
@@ -146,7 +160,6 @@ def build_pitcher_k_rate_model(
     n_players = data["n_players"]
     n_seasons = data["n_seasons"]
     has_role = "is_starter" in data
-    has_covariates = data.get("use_covariates", False)
 
     # League-average K% on logit scale
     league_k_logit = np.log(
@@ -159,9 +172,13 @@ def build_pitcher_k_rate_model(
         sigma_player = pm.HalfNormal("sigma_player", sigma=0.5)
 
         # --- Player-level intercepts (non-centered) ---
+        # No Statcast covariates: whiff_rate (r=0.71 with K%) collapses
+        # sigma_player regardless of parameterization. The hierarchical
+        # structure + random walk provide the model's calibration edge.
         alpha_raw = pm.Normal("alpha_raw", mu=0, sigma=1, shape=n_players)
         alpha = pm.Deterministic(
-            "alpha", mu_pop + sigma_player * alpha_raw
+            "alpha",
+            mu_pop + sigma_player * alpha_raw,
         )
 
         # --- Season-to-season innovation (random walk) ---
@@ -189,15 +206,7 @@ def build_pitcher_k_rate_model(
             + season_effect[player_idx, season_idx]
         )
 
-        # --- Optional arsenal covariates ---
-        if has_covariates:
-            whiff_z = data["whiff_z"]
-            barrel_against_z = data["barrel_against_z"]
-            beta_whiff = pm.Normal("beta_whiff", mu=0, sigma=0.3)
-            beta_barrel_against = pm.Normal("beta_barrel_against", mu=0, sigma=0.3)
-            theta = theta + beta_whiff * whiff_z + beta_barrel_against * barrel_against_z
-
-        # --- Starter/reliever role effect ---
+        # --- Starter/reliever role effect (role, not skill metric) ---
         if has_role:
             is_starter = data["is_starter"]
             beta_starter = pm.Normal("beta_starter", mu=0, sigma=0.2)
@@ -332,9 +341,8 @@ def check_pitcher_convergence(trace: az.InferenceData) -> dict[str, Any]:
         Summary with r_hat, ESS, and divergence counts.
     """
     var_names = ["mu_pop", "sigma_player", "sigma_season"]
-    for v in ["beta_whiff", "beta_barrel_against", "beta_starter"]:
-        if v in trace.posterior:
-            var_names.append(v)
+    if "beta_starter" in trace.posterior:
+        var_names.append("beta_starter")
     summary = az.summary(trace, var_names=var_names)
     n_divergences = int(trace.sample_stats["diverging"].sum())
     max_rhat = float(summary["r_hat"].max())

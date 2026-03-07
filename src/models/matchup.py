@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.utils.constants import LEAGUE_AVG_BY_PITCH_TYPE, PITCH_TO_FAMILY
+from src.utils.constants import LEAGUE_AVG_BY_PITCH_TYPE, LEAGUE_AVG_OVERALL, PITCH_TO_FAMILY
 
 logger = logging.getLogger(__name__)
 
@@ -356,3 +356,280 @@ def compute_game_matchup_k_rate(
         "n_matched": n_matched,
         "n_total": n_total,
     }
+
+
+# ===================================================================
+# Archetype-based matchup scoring
+# ===================================================================
+
+def _get_hitter_whiff_with_fallback_archetype(
+    hitter_vuln_arch: pd.DataFrame,
+    batter_id: int,
+    archetype: int,
+    league_whiff: float,
+    cluster_metadata: pd.DataFrame | None = None,
+    hitter_vuln_pt: pd.DataFrame | None = None,
+    baselines_pt: dict[str, dict[str, float]] | None = None,
+) -> tuple[float, float]:
+    """Look up a hitter's whiff rate for a pitch archetype with fallback.
+
+    Fallback chain
+    --------------
+    1. Direct match on (batter_id, pitch_archetype) — reliability =
+       min(swings, 50) / 50, blended toward league archetype baseline.
+    2. Primary pitch_type of that archetype (from cluster metadata) →
+       look up in pitch_type hitter vuln.
+    3. League archetype baseline — hitter_delta = 0.
+
+    Parameters
+    ----------
+    hitter_vuln_arch : pd.DataFrame
+        Hitter vulnerability by archetype with columns: batter_id,
+        pitch_archetype, swings, whiff_rate.
+    batter_id : int
+        Batter MLB ID.
+    archetype : int
+        Pitch archetype cluster ID.
+    league_whiff : float
+        League-average whiff rate for this archetype.
+    cluster_metadata : pd.DataFrame | None
+        Cluster summaries with pitch_archetype and primary_pitch_type.
+    hitter_vuln_pt : pd.DataFrame | None
+        Fallback hitter vulnerability by pitch_type.
+    baselines_pt : dict | None
+        Pitch-type-level league baselines for the fallback.
+
+    Returns
+    -------
+    tuple[float, float]
+        (whiff_rate, reliability).
+    """
+    batter_rows = hitter_vuln_arch[hitter_vuln_arch["batter_id"] == batter_id]
+
+    # Level 1: direct archetype match
+    direct = batter_rows[batter_rows["pitch_archetype"] == archetype]
+    if len(direct) > 0:
+        row = direct.iloc[0]
+        swings = row.get("swings", 0)
+        if pd.notna(swings) and swings > 0:
+            raw_whiff = row["whiff_rate"]
+            if pd.notna(raw_whiff):
+                reliability = min(float(swings), _RELIABILITY_N) / _RELIABILITY_N
+                blended = reliability * raw_whiff + (1.0 - reliability) * league_whiff
+                return float(blended), reliability
+
+    # Level 2: primary pitch_type fallback via cluster metadata
+    if cluster_metadata is not None and hitter_vuln_pt is not None:
+        meta = cluster_metadata[cluster_metadata["pitch_archetype"] == archetype]
+        if len(meta) > 0:
+            primary_pt = meta.iloc[0].get("primary_pitch_type")
+            if primary_pt is not None and pd.notna(primary_pt):
+                pt_league = (baselines_pt or {}).get(primary_pt, {}).get(
+                    "whiff_rate", league_whiff
+                )
+                whiff, rel = _get_hitter_whiff_with_fallback(
+                    hitter_vuln_pt, batter_id, primary_pt, pt_league
+                )
+                if rel > 0:
+                    return whiff, rel * 0.7  # discount for cross-reference
+
+    # Level 3: league baseline
+    return league_whiff, 0.0
+
+
+def score_matchup_by_archetype(
+    pitcher_id: int,
+    batter_id: int,
+    pitcher_offerings: pd.DataFrame,
+    hitter_vuln_arch: pd.DataFrame,
+    baselines_arch: dict[int, dict[str, float]],
+    cluster_metadata: pd.DataFrame | None = None,
+    hitter_vuln_pt: pd.DataFrame | None = None,
+    baselines_pt: dict[str, dict[str, float]] | None = None,
+) -> dict[str, Any]:
+    """Score a single pitcher-batter matchup using pitch archetypes.
+
+    Same log-odds additive math as ``score_matchup``, but grouped by
+    pitch archetype instead of raw pitch_type.
+
+    Parameters
+    ----------
+    pitcher_id : int
+        Pitcher MLB ID.
+    batter_id : int
+        Batter MLB ID.
+    pitcher_offerings : pd.DataFrame
+        Pitcher offerings with pitch_archetype, pitches, usage_pct,
+        whiff_rate columns.
+    hitter_vuln_arch : pd.DataFrame
+        Hitter vulnerability by archetype (batter_id, pitch_archetype,
+        swings, whiff_rate).
+    baselines_arch : dict[int, dict[str, float]]
+        League baselines keyed by archetype int with at least
+        "whiff_rate" key.
+    cluster_metadata : pd.DataFrame | None
+        Cluster summaries for fallback chain.
+    hitter_vuln_pt : pd.DataFrame | None
+        Pitch-type hitter vuln for fallback.
+    baselines_pt : dict | None
+        Pitch-type baselines for fallback.
+
+    Returns
+    -------
+    dict
+        Same schema as ``score_matchup``.
+    """
+    p_off = pitcher_offerings[
+        pitcher_offerings["pitcher_id"] == pitcher_id
+    ].copy()
+
+    # Filter to offerings with sufficient volume
+    p_off = p_off[p_off["pitches"] >= _MIN_PITCHES].copy()
+    if len(p_off) == 0:
+        return {
+            "pitcher_id": pitcher_id,
+            "batter_id": batter_id,
+            "matchup_whiff_rate": np.nan,
+            "baseline_whiff_rate": np.nan,
+            "matchup_k_logit_lift": 0.0,
+            "n_pitch_types": 0,
+            "avg_reliability": 0.0,
+        }
+
+    # Aggregate to pitcher-level per archetype
+    arch_agg = p_off.groupby("pitch_archetype", as_index=False).agg(
+        pitches=("pitches", "sum"),
+        swings=("swings", "sum"),
+        whiffs=("whiffs", "sum"),
+    )
+    arch_agg["whiff_rate"] = arch_agg["whiffs"] / arch_agg["swings"].replace(0, np.nan)
+    total_pitches = arch_agg["pitches"].sum()
+    arch_agg["usage_norm"] = arch_agg["pitches"] / total_pitches if total_pitches > 0 else 1.0 / len(arch_agg)
+
+    matchup_whiff = 0.0
+    baseline_whiff = 0.0
+    reliabilities = []
+
+    for _, row in arch_agg.iterrows():
+        arch = int(row["pitch_archetype"])
+        usage = row["usage_norm"]
+        pitcher_whiff = row.get("whiff_rate", np.nan)
+
+        # League baseline for this archetype
+        league_whiff = baselines_arch.get(arch, {}).get(
+            "whiff_rate", LEAGUE_AVG_OVERALL.get("whiff_rate", 0.25)
+        )
+
+        if pd.isna(pitcher_whiff):
+            pitcher_whiff = league_whiff
+
+        # Hitter whiff with fallback
+        hitter_whiff, reliability = _get_hitter_whiff_with_fallback_archetype(
+            hitter_vuln_arch, batter_id, arch, league_whiff,
+            cluster_metadata=cluster_metadata,
+            hitter_vuln_pt=hitter_vuln_pt,
+            baselines_pt=baselines_pt,
+        )
+        reliabilities.append(reliability)
+
+        # Log-odds additive method
+        league_logit = _logit(league_whiff)
+        pitcher_delta = _logit(pitcher_whiff) - league_logit
+        hitter_delta = _logit(hitter_whiff) - league_logit
+        matchup_logit = league_logit + pitcher_delta + hitter_delta
+        matchup_whiff_arch = float(_inv_logit(matchup_logit))
+
+        matchup_whiff += usage * matchup_whiff_arch
+        baseline_whiff += usage * pitcher_whiff
+
+    matchup_k_logit_lift = float(_logit(matchup_whiff) - _logit(baseline_whiff))
+
+    return {
+        "pitcher_id": pitcher_id,
+        "batter_id": batter_id,
+        "matchup_whiff_rate": matchup_whiff,
+        "baseline_whiff_rate": baseline_whiff,
+        "matchup_k_logit_lift": matchup_k_logit_lift,
+        "n_pitch_types": len(arch_agg),
+        "avg_reliability": float(np.mean(reliabilities)) if reliabilities else 0.0,
+    }
+
+
+def score_matchups_batch_by_archetype(
+    pitcher_offerings: pd.DataFrame,
+    hitter_vuln_arch: pd.DataFrame,
+    baselines_arch: dict[int, dict[str, float]],
+    matchup_pairs: list[tuple[int, int]],
+    cluster_metadata: pd.DataFrame | None = None,
+    hitter_vuln_pt: pd.DataFrame | None = None,
+    baselines_pt: dict[str, dict[str, float]] | None = None,
+) -> pd.DataFrame:
+    """Score multiple pitcher-batter matchups using pitch archetypes.
+
+    Parameters
+    ----------
+    pitcher_offerings : pd.DataFrame
+        Full pitcher offerings with pitch_archetype column.
+    hitter_vuln_arch : pd.DataFrame
+        Full hitter vulnerability by archetype.
+    baselines_arch : dict[int, dict[str, float]]
+        League baselines keyed by archetype int.
+    matchup_pairs : list[tuple[int, int]]
+        List of (pitcher_id, batter_id) pairs to score.
+    cluster_metadata : pd.DataFrame | None
+        Cluster summaries for fallback chain.
+    hitter_vuln_pt : pd.DataFrame | None
+        Pitch-type hitter vuln for fallback.
+    baselines_pt : dict | None
+        Pitch-type baselines for fallback.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per matchup pair with score columns.
+    """
+    results = []
+    for pitcher_id, batter_id in matchup_pairs:
+        result = score_matchup_by_archetype(
+            pitcher_id, batter_id,
+            pitcher_offerings, hitter_vuln_arch, baselines_arch,
+            cluster_metadata=cluster_metadata,
+            hitter_vuln_pt=hitter_vuln_pt,
+            baselines_pt=baselines_pt,
+        )
+        results.append(result)
+
+    df = pd.DataFrame(results)
+    logger.info("Scored %d archetype matchups", len(df))
+    return df
+
+
+def compute_game_matchup_k_rate_by_archetype(
+    pitcher_baseline_k_rate: float,
+    game_batter_pa: pd.DataFrame,
+    matchup_scores: pd.DataFrame,
+) -> dict[str, Any]:
+    """Compute matchup-adjusted K prediction using archetype-based scores.
+
+    Same interface as ``compute_game_matchup_k_rate`` — the only
+    difference is how ``matchup_scores`` was produced (by archetype
+    scoring instead of pitch_type scoring).
+
+    Parameters
+    ----------
+    pitcher_baseline_k_rate : float
+        Pitcher's season-level K rate (K / BF).
+    game_batter_pa : pd.DataFrame
+        Per-batter PA counts for this game. Columns: batter_id, pa.
+    matchup_scores : pd.DataFrame
+        Archetype matchup scores with columns: batter_id,
+        matchup_k_logit_lift.
+
+    Returns
+    -------
+    dict
+        Same schema as ``compute_game_matchup_k_rate``.
+    """
+    return compute_game_matchup_k_rate(
+        pitcher_baseline_k_rate, game_batter_pa, matchup_scores
+    )

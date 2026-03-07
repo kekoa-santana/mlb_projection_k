@@ -449,8 +449,8 @@ def run_full_backtest(
     """
     if folds is None:
         folds = [
-            {"train_seasons": [2020, 2021, 2022], "test_season": 2023},
-            {"train_seasons": [2020, 2021, 2022, 2023], "test_season": 2024},
+            {"train_seasons": [2018, 2019, 2020, 2021, 2022], "test_season": 2023},
+            {"train_seasons": [2018, 2019, 2020, 2021, 2022, 2023], "test_season": 2024},
         ]
 
     results = []
@@ -775,8 +775,8 @@ def run_full_pitcher_backtest(
     """
     if folds is None:
         folds = [
-            {"train_seasons": [2020, 2021, 2022], "test_season": 2023},
-            {"train_seasons": [2020, 2021, 2022, 2023], "test_season": 2024},
+            {"train_seasons": [2018, 2019, 2020, 2021, 2022], "test_season": 2023},
+            {"train_seasons": [2018, 2019, 2020, 2021, 2022, 2023], "test_season": 2024},
         ]
 
     results = []

@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dashboard = [
+    "streamlit>=1.30",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
@@ -36,3 +39,6 @@ include = ["src*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: slower end-to-end tests that sample real PyMC models on synthetic data",
+]

@@ -1,10 +1,15 @@
 """
-Layer 1: Hierarchical Bayesian K% projection model.
+Layer 1: Hitter K%-only hierarchical Bayesian model.
+
+Used by content generation scripts and the original K%-only backtest.
+For multi-stat composite projections (K%, BB%, HR/PA, xwOBA), see
+``hitter_model.py`` and ``hitter_projections.py`` instead.
 
 Estimates true-talent strikeout rate for hitters using:
 - Hierarchical partial pooling across players (no hard PA cutoffs)
 - Multi-season data with year-to-year talent evolution
-- Statcast quality metrics as informative covariates on the prior
+- Statcast quality metrics (barrel_pct, hard_hit_pct) as
+  observation-level covariates in the linear predictor
 - Binomial observation model
 
 The model produces full posterior distributions, not point estimates.
@@ -74,26 +79,32 @@ def prepare_model_data(
     min_season = df["season"].min()
     df["season_idx"] = df["season"] - min_season
 
-    # --- Statcast covariates (z-scored, NaN → 0 for missing) ---
+    # --- Statcast covariates (observation-level z-scores) ---
+    n_players = len(player_ids)
+
     for col in ["barrel_pct", "hard_hit_pct"]:
-        if col in df.columns:
-            mu = df[col].mean()
-            sd = df[col].std()
-            if pd.isna(sd) or np.isclose(sd, 0.0):
-                df[f"{col}_z"] = 0.0
-            else:
-                df[f"{col}_z"] = ((df[col] - mu) / sd).fillna(0.0)
-        else:
-            df[f"{col}_z"] = 0.0
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # Z-score each covariate across the full training set
+    barrel_vals = df["barrel_pct"].values.astype(float)
+    barrel_vals = np.nan_to_num(barrel_vals, nan=0.0)
+    mu_b, sd_b = barrel_vals.mean(), barrel_vals.std()
+    barrel_z = (barrel_vals - mu_b) / sd_b if not np.isclose(sd_b, 0.0) else np.zeros_like(barrel_vals)
+
+    hard_hit_vals = df["hard_hit_pct"].values.astype(float)
+    hard_hit_vals = np.nan_to_num(hard_hit_vals, nan=0.0)
+    mu_h, sd_h = hard_hit_vals.mean(), hard_hit_vals.std()
+    hard_hit_z = (hard_hit_vals - mu_h) / sd_h if not np.isclose(sd_h, 0.0) else np.zeros_like(hard_hit_vals)
 
     result = {
         "player_idx": df["player_idx"].values.astype(int),
         "season_idx": df["season_idx"].values.astype(int),
         "pa": df["pa"].values.astype(int),
         "k": df["k"].values.astype(int),
-        "barrel_z": df["barrel_pct_z"].values.astype(float),
-        "hard_hit_z": df["hard_hit_pct_z"].values.astype(float),
-        "n_players": len(player_ids),
+        "barrel_z": barrel_z,
+        "hard_hit_z": hard_hit_z,
+        "n_players": n_players,
         "n_seasons": df["season_idx"].max() + 1,
         "player_map": player_map,
         "player_ids": player_ids,
@@ -139,11 +150,13 @@ def build_k_rate_model(
     season_idx = data["season_idx"]
     pa = data["pa"]
     k_obs = data["k"]
-    barrel_z = data["barrel_z"]
-    hard_hit_z = data["hard_hit_z"]
     n_players = data["n_players"]
     n_seasons = data["n_seasons"]
     is_platoon = data.get("platoon", False)
+
+    # Observation-level z-scored covariates
+    barrel_z = data["barrel_z"]
+    hard_hit_z = data["hard_hit_z"]
 
     # League-average K% on logit scale
     league_k_logit = np.log(
@@ -155,15 +168,16 @@ def build_k_rate_model(
         mu_pop = pm.Normal("mu_pop", mu=league_k_logit, sigma=0.3)
         sigma_player = pm.HalfNormal("sigma_player", sigma=0.5)
 
-        # --- Statcast covariate effects ---
+        # --- Statcast covariate effects (observation-level) ---
         # Higher barrel% and hard-hit% → lower K rate (better contact ability)
         beta_barrel = pm.Normal("beta_barrel", mu=0, sigma=0.2)
         beta_hard_hit = pm.Normal("beta_hard_hit", mu=0, sigma=0.2)
 
-        # --- Player-level intercepts ---
+        # --- Player-level intercepts (non-centered) ---
         alpha_raw = pm.Normal("alpha_raw", mu=0, sigma=1, shape=n_players)
         alpha = pm.Deterministic(
-            "alpha", mu_pop + sigma_player * alpha_raw
+            "alpha",
+            mu_pop + sigma_player * alpha_raw,
         )
 
         # --- Season-to-season innovation (random walk) ---
